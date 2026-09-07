@@ -1,0 +1,23 @@
+# ---------- Coeur (indispensable) ----------
+anthropic>=0.69          # SDK Claude
+python-dotenv>=1.0       # chargement du .env
+rich>=13.7               # affichage terminal
+psutil>=6.0              # etat systeme (CPU/RAM/disque/batterie)
+
+# ---------- Controle du PC ----------
+mss>=9.0                 # captures d'ecran (leger, rapide)
+Pillow>=10.3             # manipulation d'images
+pycaw>=20240210          # volume Windows
+comtypes>=1.4            # dependance de pycaw
+
+# ---------- Voix ----------
+sounddevice>=0.4.7       # capture micro / lecture audio
+numpy>=1.26              # traitement du signal + VAD energetique
+faster-whisper>=1.0      # transcription locale (STT)
+edge-tts>=6.1            # synthese vocale neuronale (voix FR)
+pyttsx3>=2.90            # secours TTS hors-ligne (SAPI Windows)
+
+# ---------- Google (optionnel) ----------
+google-api-python-client>=2.140
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2
