@@ -30,6 +30,38 @@ def _int(nom: str, defaut: int) -> int:
         return defaut
 
 
+def _float(nom: str, defaut: float, mini: float = 0.0, maxi: float = 1e9) -> float:
+    """Une valeur illisible ou aberrante dans le .env ne doit pas empecher
+    JARVIS de demarrer : on retombe sur le defaut en le signalant."""
+    brut = (os.getenv(nom) or "").strip()
+    if not brut:
+        return defaut
+    try:
+        valeur = float(brut.replace(",", "."))
+    except ValueError:
+        print(f"[config] {nom}='{brut}' n'est pas un nombre, defaut {defaut} utilise.")
+        return defaut
+    if not mini <= valeur <= maxi:
+        print(f"[config] {nom}={valeur} hors bornes [{mini}, {maxi}], "
+              f"defaut {defaut} utilise.")
+        return defaut
+    return valeur
+
+
+EFFORTS_VALIDES = {"low", "medium", "high", "xhigh", "max"}
+
+
+def _effort(defaut: str = "medium") -> str:
+    """Un effort invalide part en erreur 400 cote API, avec un message
+    peu parlant : on le rattrape ici."""
+    valeur = (os.getenv("JARVIS_EFFORT") or defaut).strip().lower()
+    if valeur not in EFFORTS_VALIDES:
+        print(f"[config] JARVIS_EFFORT='{valeur}' inconnu "
+              f"({', '.join(sorted(EFFORTS_VALIDES))}), defaut {defaut} utilise.")
+        return defaut
+    return valeur
+
+
 @dataclass
 class Config:
     # --- Identite ---
@@ -41,7 +73,7 @@ class Config:
     # `effort` arbitre profondeur de raisonnement contre latence.
     # Pour un assistant vocal, "medium" donne des reponses vives ;
     # passe a "high" pour les taches complexes.
-    effort: str = os.getenv("JARVIS_EFFORT", "medium")
+    effort: str = _effort("medium")
     max_tokens: int = _int("JARVIS_MAX_TOKENS", 8000)
     # Nombre max d'allers-retours d'outils avant de rendre la main.
     max_tours_outils: int = _int("JARVIS_MAX_TOOL_TURNS", 25)
@@ -54,11 +86,11 @@ class Config:
     modele_whisper: str = os.getenv("JARVIS_WHISPER_MODEL", "small")
     langue: str = os.getenv("JARVIS_LANG", "fr")
     # Duree de silence (secondes) qui marque la fin d'une phrase.
-    silence_fin_phrase: float = float(os.getenv("JARVIS_SILENCE", "0.9"))
+    silence_fin_phrase: float = _float("JARVIS_SILENCE", 0.9, 0.2, 5.0)
     # Seuil d'energie du micro : monte-le si la piece est bruyante.
-    seuil_micro: float = float(os.getenv("JARVIS_MIC_THRESHOLD", "0.015"))
+    seuil_micro: float = _float("JARVIS_MIC_THRESHOLD", 0.015, 0.001, 0.5)
     # Apres une reponse, JARVIS ecoute la suite sans mot de reveil pendant N s.
-    fenetre_conversation: float = float(os.getenv("JARVIS_FOLLOWUP_WINDOW", "12"))
+    fenetre_conversation: float = _float("JARVIS_FOLLOWUP_WINDOW", 12.0, 0.0, 300.0)
 
     # --- Securite ---
     # Les outils sensibles demandent une confirmation explicite.

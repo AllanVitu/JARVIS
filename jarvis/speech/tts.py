@@ -17,6 +17,7 @@ import asyncio
 import io
 import re
 import threading
+import time
 
 import numpy as np
 
@@ -25,6 +26,8 @@ FREQUENCE = 24_000
 DECOUPE_PHRASES = re.compile(r"(?<=[.!?…])\s+|\n+")
 # Le TTS lit les asterisques et les diese : on nettoie avant de parler.
 MARKDOWN = re.compile(r"[*_`#>]+")
+# Duree pendant laquelle on ne retente pas edge-tts apres deux echecs.
+COOLDOWN_EDGE = 60.0
 
 
 def nettoyer_pour_la_voix(texte: str) -> str:
@@ -40,8 +43,11 @@ class Voix:
         self.vitesse = vitesse
         self._stop = threading.Event()
         self._parle = threading.Event()
-        self._moteur_secours = None
-        self._edge_disponible = True
+        # Une coupure reseau passagere ne doit pas condamner la voix
+        # neuronale pour toute la session : on ne bascule sur SAPI qu'apres
+        # deux echecs consecutifs, et on retente edge-tts apres une pause.
+        self._echecs_edge = 0
+        self._reprise_edge = 0.0
 
     # ------------------------------------------------------------ interface
 
@@ -61,12 +67,18 @@ class Voix:
         self._stop.clear()
         self._parle.set()
         try:
-            if self._edge_disponible:
+            if time.monotonic() >= self._reprise_edge:
                 try:
                     self._parler_edge(texte)
+                    self._echecs_edge = 0
                     return
-                except Exception:  # noqa: BLE001 - reseau coupe, voix inconnue...
-                    self._edge_disponible = False
+                except Exception as err:  # noqa: BLE001 - reseau, voix inconnue...
+                    self._echecs_edge += 1
+                    if self._echecs_edge >= 2:
+                        self._reprise_edge = time.monotonic() + COOLDOWN_EDGE
+                        self._echecs_edge = 0
+                        print(f"[voix] edge-tts indisponible ({err}). "
+                              f"Voix Windows pendant {COOLDOWN_EDGE:.0f} s.")
             self._parler_secours(texte)
         finally:
             self._parle.clear()

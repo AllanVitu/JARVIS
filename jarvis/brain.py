@@ -27,6 +27,51 @@ OUTIL_RECHERCHE_WEB = {
     "max_uses": 6,
 }
 
+class ErreurJarvis(RuntimeError):
+    """Erreur deja formulee en clair, prete a etre montree a l'utilisateur."""
+
+
+def traduire_erreur(err: Exception) -> str:
+    """Transforme une exception du SDK en message actionnable.
+
+    L'ordre va du plus specifique au plus general : `RateLimitError` et
+    `OverloadedError` heritent de `APIStatusError`, donc un `except` unique
+    sur la classe large effacerait la distinction entre une panne
+    retentable et une erreur de configuration.
+    """
+    if isinstance(err, anthropic.AuthenticationError):
+        return ("Cle API refusee. Verifie ANTHROPIC_API_KEY dans le .env : "
+                "cle incomplete, revoquee, ou guillemets en trop.")
+    if isinstance(err, anthropic.PermissionDeniedError):
+        return ("Acces refuse. Ce compte n'a pas le droit d'utiliser "
+                "ce modele, ou la cle n'a pas la bonne portee.")
+    if isinstance(err, anthropic.NotFoundError):
+        return ("Modele introuvable. Corrige JARVIS_MODEL dans le .env "
+                "(par exemple claude-opus-5).")
+    if isinstance(err, anthropic.RateLimitError):
+        return ("Limite de debit atteinte, ou credit epuise. Attends "
+                "quelques secondes, ou verifie ton solde sur "
+                "console.anthropic.com/settings/billing.")
+    if isinstance(err, (anthropic.OverloadedError,
+                        anthropic.ServiceUnavailableError,
+                        anthropic.InternalServerError)):
+        return "L'API est momentanement surchargee. Reessaie dans un instant."
+    if isinstance(err, anthropic.RequestTooLargeError):
+        return ("Conversation trop longue pour une seule requete. "
+                "Tape /reset pour repartir sur un fil neuf.")
+    if isinstance(err, anthropic.BadRequestError):
+        return f"Requete refusee par l'API : {err}"
+    if isinstance(err, anthropic.APITimeoutError):
+        return ("L'API n'a pas repondu dans les temps. Reessaie, ou baisse "
+                "JARVIS_EFFORT pour des reponses plus rapides.")
+    if isinstance(err, anthropic.APIConnectionError):
+        return ("Impossible de joindre l'API. Verifie ta connexion internet "
+                "(ou un pare-feu / proxy qui bloquerait la sortie).")
+    if isinstance(err, anthropic.APIStatusError):
+        return f"Erreur HTTP {err.status_code} cote API : {err}"
+    return f"Erreur inattendue ({type(err).__name__}) : {err}"
+
+
 IDENTITE = """Tu es {nom}, l'assistant personnel de {utilisateur}.
 
 Ton caractere : posé, efficace, un brin d'humour sec. Tu es serviable sans
@@ -77,6 +122,8 @@ class Cerveau:
         self.client = client or anthropic.Anthropic()
         self.session = f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
         self.messages: list[dict[str, Any]] = []
+        # Debut du tour en cours, pour pouvoir le defaire s'il echoue.
+        self._point_de_reprise = 0
         # Passe a False si l'API refuse le parametre de repli serveur.
         self._replis_disponibles = True
         self._systeme = self._construire_systeme()
@@ -151,22 +198,39 @@ class Cerveau:
             "output_config": {"effort": self.config.effort},
         }
 
-        if self._replis_disponibles:
-            try:
-                return self._flux(
-                    self.client.beta.messages.stream,
-                    {**parametres,
-                     "betas": ["server-side-fallback-2026-07-01"],
-                     "fallbacks": "default"},
-                    sur_texte,
-                )
-            except (TypeError, anthropic.BadRequestError) as err:
-                # SDK ou compte sans le repli serveur : on continue sans.
-                self._replis_disponibles = False
-                if isinstance(err, anthropic.BadRequestError) and "fallback" not in str(err).lower():
-                    raise
+        try:
+            if self._replis_disponibles:
+                try:
+                    return self._flux(
+                        self.client.beta.messages.stream,
+                        {**parametres,
+                         "betas": ["server-side-fallback-2026-07-01"],
+                         "fallbacks": "default"},
+                        sur_texte,
+                    )
+                except (TypeError, anthropic.BadRequestError) as err:
+                    # Un 400 qui ne parle pas du repli est une vraie erreur
+                    # de requete : on la laisse remonter telle quelle.
+                    if (isinstance(err, anthropic.BadRequestError)
+                            and "fallback" not in str(err).lower()):
+                        raise
+                    # SDK ou compte sans le repli serveur : on continue sans.
+                    self._replis_disponibles = False
 
-        return self._flux(self.client.messages.stream, parametres, sur_texte)
+            return self._flux(self.client.messages.stream, parametres, sur_texte)
+
+        except anthropic.APIError as err:
+            self.nettoyer_tour_incomplet()
+            raise ErreurJarvis(traduire_erreur(err)) from err
+
+    def nettoyer_tour_incomplet(self) -> None:
+        """Retire le tour interrompu de l'historique.
+
+        A appeler apres une erreur d'API ou une interruption clavier : sans
+        ca, la conversation repartirait avec deux messages `user` a la suite
+        et l'API refuserait la requete suivante.
+        """
+        del self.messages[self._point_de_reprise:]
 
     @staticmethod
     def _flux(ouvrir_flux, parametres: dict[str, Any],
@@ -194,6 +258,11 @@ class Cerveau:
         `sur_texte` reçoit le texte au fil du streaming, `sur_outil` est
         appelé avant chaque exécution d'outil, `sur_resultat` après.
         """
+        # Si la requete echoue en cours de route, l'historique garderait un
+        # tour incomplet (un `user` sans reponse, ou un `tool_use` sans son
+        # `tool_result`) et l'appel suivant serait rejete. On retient le
+        # point de reprise pour pouvoir revenir a un etat coherent.
+        self._point_de_reprise = len(self.messages)
         self.messages.append({"role": "user", "content": entree})
         self.memoire.ajouter_message(self.session, "user", entree)
 
@@ -267,6 +336,7 @@ class Cerveau:
     def reinitialiser(self) -> None:
         """Vide le fil de discussion, garde la mémoire long terme."""
         self.messages.clear()
+        self._point_de_reprise = 0
         self._systeme = self._construire_systeme()
 
 

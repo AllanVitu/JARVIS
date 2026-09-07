@@ -12,7 +12,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from .brain import Cerveau, construire_registre, outils_absents
+from .brain import Cerveau, ErreurJarvis, construire_registre, outils_absents
 from .config import config
 from .memory import Memoire
 
@@ -99,10 +99,17 @@ def boucle_texte(cerveau: Cerveau, memoire: Memoire) -> str | None:
                 sur_resultat=_afficher_resultat_outil,
             )
         except KeyboardInterrupt:
+            cerveau.nettoyer_tour_incomplet()
             console.print("\n[dim](interrompu)[/dim]")
             continue
+        except ErreurJarvis as err:
+            console.print()
+            console.print(Panel(escape(str(err)), title="[red]Probleme[/red]",
+                                border_style="red"))
+            continue
         except Exception as err:  # noqa: BLE001
-            console.print(f"\n[red]Erreur : {err}[/red]")
+            cerveau.nettoyer_tour_incomplet()
+            console.print(f"\n[red]Erreur inattendue : {escape(str(err))}[/red]")
             continue
 
         if not premier.is_set():
@@ -123,8 +130,20 @@ def boucle_vocale(cerveau: Cerveau, memoire: Memoire) -> str | None:
     voix = Voix(config.voix_tts, config.vitesse_tts)
     micro = Micro(seuil=config.seuil_micro, silence_fin=config.silence_fin_phrase)
 
-    with console.status("[cyan]Chargement du modele de transcription..."):
-        oreille.charger()
+    # Premier lancement : telechargement du modele (~460 Mo pour `small`).
+    # Un reseau coupe ou un disque plein ne doit pas jeter une trace brute.
+    try:
+        with console.status("[cyan]Chargement du modele de transcription..."):
+            oreille.charger()
+    except Exception as err:  # noqa: BLE001
+        console.print(Panel(
+            f"Impossible de charger le modele de transcription "
+            f"'{config.modele_whisper}'.\n\n{escape(str(err))}\n\n"
+            "Le premier lancement doit telecharger le modele : verifie ta "
+            "connexion. Sinon, essaie JARVIS_WHISPER_MODEL=base dans le .env.",
+            title="[red]Mode vocal indisponible[/red]", border_style="red",
+        ))
+        return "texte"
 
     # En mode vocal, la confirmation se demande a l'oral pour rester
     # mains libres ; le clavier reste disponible en secours.
@@ -156,7 +175,20 @@ def boucle_vocale(cerveau: Cerveau, memoire: Memoire) -> str | None:
         border_style="green",
     ))
 
-    micro.demarrer()
+    try:
+        micro.demarrer()
+    except Exception as err:  # noqa: BLE001 - pas de micro, pilote occupe...
+        console.print(Panel(
+            f"Le micro n'a pas pu demarrer.\n\n{escape(str(err))}\n\n"
+            "Verifie qu'un micro est branche et selectionne par defaut dans "
+            "Windows, et qu'aucune autre application ne le monopolise.\n"
+            "Pour lister les peripheriques :\n"
+            "  .venv\\Scripts\\python.exe -c \"import sounddevice; "
+            "print(sounddevice.query_devices())\"",
+            title="[red]Micro indisponible[/red]", border_style="red",
+        ))
+        return "texte"
+
     voix.parler(f"Bonjour {config.nom_utilisateur}, je vous ecoute.")
     micro.reprendre()
 
@@ -215,8 +247,13 @@ def boucle_vocale(cerveau: Cerveau, memoire: Memoire) -> str | None:
                     sur_outil=_afficher_appel_outil,
                     sur_resultat=_afficher_resultat_outil,
                 )
+            except ErreurJarvis as err:
+                # Message deja formule en clair : JARVIS peut le dire tel quel.
+                console.print(f"\n[red]{escape(str(err))}[/red]")
+                reponse = str(err)
             except Exception as err:  # noqa: BLE001
-                console.print(f"\n[red]Erreur : {err}[/red]")
+                cerveau.nettoyer_tour_incomplet()
+                console.print(f"\n[red]Erreur inattendue : {escape(str(err))}[/red]")
                 reponse = "J'ai rencontre un probleme technique."
 
             console.print("\n")
@@ -340,11 +377,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # Mode "one-shot" : jarvis "quelle heure il est"
     if args.demande:
-        reponse = cerveau.demander(" ".join(args.demande),
-                                   sur_outil=_afficher_appel_outil)
-        console.print(reponse, markup=False)
-        memoire.fermer()
-        return 0
+        try:
+            reponse = cerveau.demander(" ".join(args.demande),
+                                       sur_outil=_afficher_appel_outil)
+            console.print(reponse, markup=False)
+            return 0
+        except ErreurJarvis as err:
+            console.print(f"[red]{escape(str(err))}[/red]")
+            return 1
+        except KeyboardInterrupt:
+            return 130
+        finally:
+            memoire.fermer()
 
     console.print(Panel(
         f"[bold]{config.nom_assistant}[/bold] est en ligne.\n"

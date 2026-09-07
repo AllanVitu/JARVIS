@@ -262,6 +262,131 @@ def test_repli_sans_fallbacks():
     print("  OK  repli automatique si le parametre fallbacks est refuse")
 
 
+# --------------------------------------------------- gestion des erreurs
+
+
+def _erreur_http(classe, code):
+    import httpx2
+
+    requete = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    return classe("boum", response=httpx2.Response(code, request=requete), body=None)
+
+
+def test_traduction_des_erreurs():
+    import anthropic
+
+    from jarvis.brain import traduire_erreur
+
+    cas = [
+        (_erreur_http(anthropic.AuthenticationError, 401), "ANTHROPIC_API_KEY"),
+        (_erreur_http(anthropic.NotFoundError, 404), "JARVIS_MODEL"),
+        (_erreur_http(anthropic.RateLimitError, 429), "credit"),
+        (_erreur_http(anthropic.OverloadedError, 529), "surchargee"),
+    ]
+    for erreur, attendu in cas:
+        message = traduire_erreur(erreur)
+        assert attendu in message, f"{type(erreur).__name__} -> {message}"
+
+    import httpx2
+    requete = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    hors_ligne = traduire_erreur(anthropic.APIConnectionError(request=requete))
+    assert "connexion internet" in hors_ligne, hors_ligne
+
+    # Chaque famille doit donner un message distinct, sinon la traduction
+    # ne sert a rien.
+    messages = {traduire_erreur(e) for e, _ in cas}
+    assert len(messages) == len(cas), "des erreurs differentes donnent le meme texte"
+    print("  OK  erreurs API traduites en messages distincts et actionnables")
+
+
+def test_historique_propre_apres_erreur():
+    """Une erreur d'API ne doit pas laisser un message `user` orphelin :
+    l'appel suivant partirait avec deux `user` de suite et serait rejete."""
+    import anthropic
+
+    from jarvis.brain import ErreurJarvis
+
+    memoire, registre = preparer()
+    etat = {"echouer": True}
+    envois = []
+
+    def stream(**kwargs):
+        envois.append(list(kwargs["messages"]))
+        if etat["echouer"]:
+            raise _erreur_http(anthropic.RateLimitError, 429)
+        return FauxFlux(message([bloc_texte("Me revoila.")]))
+
+    client = SimpleNamespace(
+        messages=SimpleNamespace(stream=stream),
+        beta=SimpleNamespace(messages=SimpleNamespace(stream=stream)),
+    )
+    cerveau = Cerveau(config, registre, memoire, client=client)
+
+    try:
+        cerveau.demander("premiere question")
+        raise AssertionError("une erreur d'API aurait du remonter")
+    except ErreurJarvis as err:
+        assert "credit" in str(err) or "debit" in str(err), str(err)
+
+    assert cerveau.messages == [], f"historique pollue : {cerveau.messages}"
+
+    # La conversation doit repartir normalement.
+    etat["echouer"] = False
+    reponse = cerveau.demander("deuxieme question")
+    assert reponse == "Me revoila.", reponse
+
+    roles = [m["role"] for m in envois[-1]]
+    assert roles == ["user"], f"roles envoyes apres reprise : {roles}"
+    assert envois[-1][0]["content"] == "deuxieme question"
+    print("  OK  historique restaure apres une erreur d'API")
+
+
+def test_nettoyage_apres_interruption():
+    """Ctrl+C pendant un appel d'outil laisse un tool_use sans tool_result :
+    `nettoyer_tour_incomplet` doit defaire tout le tour."""
+    memoire, registre = preparer()
+    client = FauxClient([message([bloc_texte("ok")])])
+    cerveau = Cerveau(config, registre, memoire, client=client)
+
+    cerveau.demander("une question")
+    assert len(cerveau.messages) == 2
+
+    # Simule un second tour interrompu en plein vol.
+    cerveau._point_de_reprise = len(cerveau.messages)
+    cerveau.messages.append({"role": "user", "content": "deuxieme"})
+    cerveau.messages.append({"role": "assistant", "content": [bloc_outil("x", {})]})
+
+    cerveau.nettoyer_tour_incomplet()
+    assert len(cerveau.messages) == 2, cerveau.messages
+    assert cerveau.messages[-1]["role"] == "assistant"
+    print("  OK  tour interrompu retire de l'historique")
+
+
+def test_config_resiste_aux_valeurs_invalides():
+    import importlib
+    import os
+
+    from jarvis import config as module_config
+
+    anciennes = {c: os.environ.get(c) for c in
+                 ("JARVIS_SILENCE", "JARVIS_EFFORT", "JARVIS_MIC_THRESHOLD")}
+    os.environ.update({"JARVIS_SILENCE": "beaucoup", "JARVIS_EFFORT": "turbo",
+                       "JARVIS_MIC_THRESHOLD": "99"})
+    try:
+        recharge = importlib.reload(module_config)
+        assert recharge.config.silence_fin_phrase == 0.9
+        assert recharge.config.effort == "medium"
+        assert recharge.config.seuil_micro == 0.015
+    finally:
+        for cle, valeur in anciennes.items():
+            if valeur is None:
+                os.environ.pop(cle, None)
+            else:
+                os.environ[cle] = valeur
+        importlib.reload(module_config)
+    print("  OK  un .env casse ne bloque pas le demarrage")
+
+
 if __name__ == "__main__":
     tests = [valeur for nom, valeur in sorted(globals().items())
              if nom.startswith("test_") and callable(valeur)]
