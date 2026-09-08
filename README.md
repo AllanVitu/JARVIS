@@ -31,8 +31,12 @@ copy .env.example .env
 #    ANTHROPIC_API_KEY=sk-ant-...
 
 # 3. Lancer
-.venv\Scripts\python.exe jarvis.py
+.\jarvis
 ```
+
+> Il faut du **crédit** sur le compte Anthropic, pas seulement une clé
+> valide. Sans solde, l'API répond « credit balance is too low » :
+> [console.anthropic.com/settings/billing](https://console.anthropic.com/settings/billing).
 
 Si tu repars d'une machine vierge :
 
@@ -49,10 +53,14 @@ py -3.13 -m venv .venv
 ## Utilisation
 
 ```powershell
-.venv\Scripts\python.exe jarvis.py              # mode texte
-.venv\Scripts\python.exe jarvis.py --voix       # mode vocal
-.venv\Scripts\python.exe jarvis.py "eteins le son et dis-moi l'etat du PC"
+.\jarvis                                    # mode texte
+.\jarvis --voix                             # mode vocal
+.\jarvis "eteins le son et dis-moi l'etat du PC"   # une question, puis sortie
 ```
+
+`jarvis.bat` utilise le venv du projet automatiquement — pas besoin de
+l'activer. Si tu preferes la forme explicite :
+`.venv\Scripts\python.exe jarvis.py`
 
 Le **premier lancement en mode vocal** télécharge le modèle Whisper
 (~460 Mo pour `small`). Ensuite, c'est instantané et hors-ligne.

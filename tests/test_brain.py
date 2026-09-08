@@ -292,6 +292,16 @@ def test_traduction_des_erreurs():
     hors_ligne = traduire_erreur(anthropic.APIConnectionError(request=requete))
     assert "connexion internet" in hors_ligne, hors_ligne
 
+    # Le solde epuise arrive en 400 et non en 402 : sans traitement dedie il
+    # se noie dans le message generique des requetes invalides.
+    solde = _erreur_http(anthropic.BadRequestError, 400)
+    solde.message = ("Your credit balance is too low to access the "
+                     "Anthropic API.")
+    solde.args = (solde.message,)
+    message_solde = traduire_erreur(solde)
+    assert "Credit Anthropic epuise" in message_solde, message_solde
+    assert "billing" in message_solde, message_solde
+
     # Chaque famille doit donner un message distinct, sinon la traduction
     # ne sert a rien.
     messages = {traduire_erreur(e) for e, _ in cas}

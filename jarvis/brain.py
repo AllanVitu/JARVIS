@@ -60,6 +60,14 @@ def traduire_erreur(err: Exception) -> str:
         return ("Conversation trop longue pour une seule requete. "
                 "Tape /reset pour repartir sur un fil neuf.")
     if isinstance(err, anthropic.BadRequestError):
+        # Le solde epuise arrive en 400, pas en 402 : sans ce cas particulier
+        # il se noie dans un message generique alors que c'est le probleme
+        # le plus frequent au premier lancement.
+        if "credit balance" in str(err).lower():
+            return ("Credit Anthropic epuise. La cle est valide, mais le "
+                    "compte n'a plus de solde.\n"
+                    "Ajoute des credits sur "
+                    "console.anthropic.com/settings/billing, puis relance.")
         return f"Requete refusee par l'API : {err}"
     if isinstance(err, anthropic.APITimeoutError):
         return ("L'API n'a pas repondu dans les temps. Reessaie, ou baisse "
